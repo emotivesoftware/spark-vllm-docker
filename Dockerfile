@@ -471,6 +471,30 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     sed -i '/^fastsafetensors\b/d' requirements/test/cuda.txt && \
     uv pip install -r requirements/build/cuda.txt
 
+# --- Rust frontend for the MiniMax-M3 tool parser (vllm._rust_tool_parser, PyO3/abi3) ---
+# Without this, `--tool-call-parser minimax_m3` loads but 500s at request time
+# (ModuleNotFoundError: vllm._rust_tool_parser -> RuntimeError "Rust tool parsing requires
+# the vllm._rust_tool_parser PyO3 extension"). vLLM builds the ext via setuptools-rust ONLY
+# when a cargo toolchain is present at wheel-build time; this image previously had none, so
+# the ext was silently omitted. The pinned toolchain is rust/rust-toolchain.toml (channel
+# 1.95). VLLM_REQUIRE_RUST_FRONTEND=1 makes `uv build --wheel` FAIL LOUD if the ext can't be
+# built, so a broken toolchain never again ships a parser-less image.
+# The rust frontend also builds the vllm-server/vllm-rs crates (prost/tonic gRPC + vendored
+# native-tls). vllm_grpc.proto imports the well-known type google/protobuf/struct.proto, so
+# the builder needs: protobuf-compiler (protoc binary; else "Could not find protoc"),
+# libprotobuf-dev (ships the WKT .proto files at /usr/include/google/protobuf/; else
+# "google/protobuf/struct.proto: File not found"), and perl+make (vendored OpenSSL). cc comes
+# from the CUDA gcc. PROTOC_INCLUDE tells prost/tonic where to resolve the WKT imports.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates protobuf-compiler libprotobuf-dev perl make pkg-config && \
+    test -f /usr/include/google/protobuf/struct.proto && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95 && \
+    /root/.cargo/bin/rustc --version && protoc --version && \
+    uv pip install "setuptools-rust>=1.9.0"
+ENV PATH="/root/.cargo/bin:${PATH}"
+ENV PROTOC_INCLUDE=/usr/include
+ENV VLLM_REQUIRE_RUST_FRONTEND=1
+
 # Apply Patches
 # TEMPORARY PATCH for fastsafetensors loading in cluster setup - tracking https://github.com/vllm-project/vllm/issues/34180
 # COPY fastsafetensors.patch .
@@ -489,7 +513,10 @@ RUN --mount=type=cache,id=ccache,target=/root/.ccache \
     uv build --no-build-isolation --wheel . --out-dir=/workspace/wheels -v && \
     # dump git ref in the wheels dir
     git rev-parse HEAD > /workspace/wheels/.vllm-commit && \
-    git -C "$DEEPGEMM_SRC_DIR" rev-parse HEAD > /workspace/wheels/.deepgemm-commit
+    git -C "$DEEPGEMM_SRC_DIR" rev-parse HEAD > /workspace/wheels/.deepgemm-commit && \
+    # Build the DeepGEMM wheel into /workspace/wheels so the runner installs it.
+    # DeepSeek-V4 Flash's Sparse (Lightning) Attention Indexer hard-requires deep_gemm.
+    ( cd "$DEEPGEMM_SRC_DIR" && python3 setup.py bdist_wheel --dist-dir /workspace/wheels )
 
 # =========================================================
 # STAGE 5: vLLM Wheel Export
@@ -583,7 +610,7 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     PINNED_TORCH=$(python3 -c "import torch; print(torch.__version__)") && \
     echo "torch==${PINNED_TORCH}" > /tmp/torch-override.txt && \
     echo "fastapi[standard]>=0.115.0,<0.137.0" >> /tmp/torch-override.txt && \
-    uv pip install ray[default] fastsafetensors instanttensor \
+    uv pip install ray[default] fastsafetensors instanttensor b12x \
         --override /tmp/torch-override.txt
 
 # Fix NCCL
