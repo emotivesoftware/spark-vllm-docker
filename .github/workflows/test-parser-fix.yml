@@ -1,0 +1,22 @@
+name: Pinned parser fix tests
+on:
+  pull_request:
+    paths:
+      - 'fixes/qwen38-parser/**'
+      - '.github/workflows/test-parser-fix.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'fixes/qwen38-parser/**'
+      - '.github/workflows/test-parser-fix.yml'
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s fixes/qwen38-parser -v
